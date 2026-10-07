@@ -2,8 +2,10 @@
 //   { event, params, body, sub, claims, data, config }
 // Handlers never see another user's partition — `data` is owner-scoped to
 // ctx.sub, and no handler reads a user id from the request.
+import crypto from 'node:crypto';
 import { json, error } from './response.mjs';
 import { VersionConflict } from './errors.mjs';
+import { photoKey } from './media.mjs';
 
 // SK conventions for the single-table layout.
 const SK = {
@@ -65,6 +67,40 @@ export async function deleteItem(ctx) {
   const id = ctx.params.id;
   if (!validId(id)) return error(400, 'bad_id', 'invalid item id');
   await ctx.data.deleteItem(ctx.sub, SK.item(id));
+  return json(200, { deleted: id });
+}
+
+// Photo types a browser can render. Pinned into the signed upload policy, so
+// S3 itself rejects any other Content-Type.
+const PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic']);
+
+// POST /photos — body { contentType }. Returns a presigned upload form; the
+// browser POSTs the file straight to S3 (multipart: fields first, then file).
+export function postPhoto(ctx) {
+  if (!ctx.media) return error(501, 'media_not_configured', 'photo storage is not configured');
+  const contentType = ctx.body && ctx.body.contentType;
+  if (!PHOTO_TYPES.has(contentType)) {
+    return error(400, 'bad_content_type', `contentType must be one of ${[...PHOTO_TYPES].join(', ')}`);
+  }
+  const id = crypto.randomUUID();
+  const upload = ctx.media.uploadForm(photoKey(ctx.sub, id), contentType);
+  return json(201, { id, upload, maxBytes: ctx.media.maxBytes, expiresIn: ctx.media.expiresIn });
+}
+
+// GET /photos/:id — a short-lived download URL (usable directly as an <img src>).
+export function getPhoto(ctx) {
+  if (!ctx.media) return error(501, 'media_not_configured', 'photo storage is not configured');
+  const id = ctx.params.id;
+  if (!validId(id)) return error(400, 'bad_id', 'invalid photo id');
+  return json(200, { id, url: ctx.media.downloadUrl(photoKey(ctx.sub, id)), expiresIn: ctx.media.expiresIn });
+}
+
+// DELETE /photos/:id
+export async function deletePhoto(ctx) {
+  if (!ctx.media) return error(501, 'media_not_configured', 'photo storage is not configured');
+  const id = ctx.params.id;
+  if (!validId(id)) return error(400, 'bad_id', 'invalid photo id');
+  await ctx.media.remove(photoKey(ctx.sub, id));
   return json(200, { deleted: id });
 }
 

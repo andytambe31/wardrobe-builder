@@ -62,6 +62,18 @@ data "aws_iam_policy_document" "perms" {
     ]
     resources = compact([var.table_arn, var.table_gsi_arn])
   }
+  # Object access to the media bucket, only under users/ (the API derives every
+  # key as users/<sub>/... from the verified token). No ListBucket: the app
+  # never enumerates the bucket.
+  dynamic "statement" {
+    for_each = var.enable_media ? [var.media_bucket_arn] : []
+    content {
+      sid       = "MediaObjects"
+      effect    = "Allow"
+      actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+      resources = ["${statement.value}/users/*"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "perms" {

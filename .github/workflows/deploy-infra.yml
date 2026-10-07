@@ -34,6 +34,20 @@ env:
   TF_VERSION: 1.9.8
 
 jobs:
+  # API unit tests — no AWS, no network (in-memory data layer + local JWT keys).
+  # Runs on PRs and gates the apply, so a broken Lambda never ships.
+  api-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm test
+
   # PR checks — no AWS. Proves the config is well-formed and formatted.
   validate:
     if: github.event_name == 'pull_request'
@@ -62,6 +76,7 @@ jobs:
   # it never lives in git.
   apply:
     if: github.event_name == 'workflow_dispatch'
+    needs: api-test
     runs-on: ubuntu-latest
     # NOTE: intentionally NOT using `environment:` here. A GitHub Environment
     # changes the OIDC subject to `repo:.../:environment:<name>`, which the
@@ -103,3 +118,16 @@ jobs:
             -var="alert_email=${{ vars.ALERT_EMAIL }}" \
             -var='allowed_emails=["${{ vars.ALERT_EMAIL }}"]' \
             -var='allowed_subs=["${{ vars.ALLOWED_SUBS }}"]'
+
+      # Post-deploy smoke test: the public /health route must answer 200 from
+      # the freshly applied Lambda. Retries cover API Gateway/Lambda propagation.
+      - name: Smoke test /health
+        run: |
+          set -euo pipefail
+          API=$(terraform output -raw api_endpoint)
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "$API/health"; then echo; echo "healthy: $API"; exit 0; fi
+            echo "attempt $i failed; retrying in 10s"; sleep 10
+          done
+          echo "::error::$API/health did not return 200 after deploy"
+          exit 1

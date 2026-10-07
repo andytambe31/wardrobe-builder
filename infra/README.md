@@ -17,6 +17,8 @@ least-privilege IAM, observability, and dev/prod separation.
    ▼
  Lambda (Node 20) ──▶ DynamoDB single-table        [modules/lambda, dynamodb]
    │                    (PK=USER#sub, GSI1, PITR, deletion protection)
+   ├─ signs uploads/downloads ──▶ S3 media bucket   [modules/media]
+   │    (private, users/<sub>/photos/*; browser POSTs/GETs via presigned forms/URLs)
    └─ CloudWatch logs/alarms + budget              [modules/observability]
 
  State:  S3 + DynamoDB lock                         [bootstrap]
@@ -30,7 +32,7 @@ infra/
   bootstrap/            # remote state bucket + lock + GitHub OIDC role (run ONCE, local state)
   modules/
     app-stack/          # composes the leaf modules for one environment
-    dynamodb/  cognito/  lambda/  apigateway/  frontend/  observability/
+    dynamodb/  cognito/  lambda/  apigateway/  frontend/  media/  observability/
   envs/dev/  envs/prod/ # thin roots: provider + backend + one app-stack call
 services/api/           # the Lambda source (auth/authz platform + generic owner-scoped CRUD)
 ```
@@ -101,10 +103,17 @@ aws cloudfront create-invalidation \
 
 ## CI/CD
 
-`.github/workflows/deploy-infra.yml`: on a PR touching `infra/**` it runs
-`fmt`/`validate`/`plan` for dev+prod via the OIDC role (no stored keys); a manual
-**workflow_dispatch** applies the chosen env. It won't run on ordinary pushes, so
-nothing deploys until you wire the AWS account and trigger it.
+`.github/workflows/deploy-infra.yml`:
+
+- **On a PR** touching `infra/**` or `services/api/**`: the API unit tests, plus
+  `fmt` (advisory) and `validate` for dev and prod. No AWS access — PRs can't
+  assume the deploy role.
+- **On workflow_dispatch** (Actions → Terraform (infra) → Run workflow → env):
+  API tests first, then `plan` + `apply` through the OIDC role (no stored keys),
+  then a smoke test that `GET /health` on the new API returns 200.
+
+It won't run on ordinary pushes, so nothing deploys until you wire the AWS
+account and trigger it.
 
 ## Notes / deliberate choices
 
@@ -115,6 +124,13 @@ nothing deploys until you wire the AWS account and trigger it.
   allow-list authz gate, owner-scoped DynamoDB, and CRUD (`/state`, `/items`,
   `/settings`) with `If-Match` optimistic concurrency. See
   `services/api/README.md`.
+- **Photos go straight to S3, never through the Lambda**: `POST /photos` returns
+  a presigned POST form whose signed policy pins the exact key
+  (`users/<sub>/photos/<uuid>`), the image Content-Type and a size cap
+  (`media_max_bytes`, 10 MB by default), so S3 itself rejects anything else.
+  `GET /photos/:id` returns a 5-minute download URL. The Lambda role can only
+  read/write/delete under `users/*`; the bucket is private, TLS-only, encrypted
+  and versioned (old versions expire after 30 days).
 - **Auth is Hosted UI + PKCE**: the SPA client has no secret; a Cognito domain
   is auto-created so the login flow works out of the box. The app re-verifies
   tokens itself, so gateway + app both enforce.
@@ -130,6 +146,9 @@ nothing deploys until you wire the AWS account and trigger it.
   root-inclusive, future-proof enforcement, enable **AWS Organizations** and
   promote this same policy JSON to a **Service Control Policy** attached to the
   account/OU (an SCP the root user can't override).
+  As an SCP it would also bind the Lambda role, so exempt
+  `role/wardrobe-builder-*-api-exec` (or scope the S3 deny away from the media
+  bucket) first — otherwise photo uploads and deletes stop working.
 - **Least-privilege deploy role (default)**: the GitHub Actions OIDC role gets a
   hand-scoped policy (`wardrobe-builder-ci-deploy`) that grants only the services these
   stacks manage — DynamoDB/Lambda/Cognito/API Gateway/S3/CloudFront/SNS/

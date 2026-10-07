@@ -22,6 +22,11 @@ output "custom_domain_target" {
   value       = var.enable_frontend ? one(module.frontend[*].distribution_domain) : null
 }
 
+output "media_bucket" {
+  description = "Private S3 bucket holding user photos (users/<sub>/...)."
+  value       = module.media.bucket_name
+}
+
 output "table_name" {
   value = module.dynamodb.table_name
 }

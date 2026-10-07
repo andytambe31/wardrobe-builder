@@ -37,6 +37,26 @@ locked to the configured origins.
 | PUT    | `/settings`   | gated  | Upsert settings (optimistic concurrency)         |
 | PUT    | `/items/:id`  | gated  | Upsert an item (optimistic concurrency)          |
 | DELETE | `/items/:id`  | gated  | Delete an item                                   |
+| POST   | `/photos`     | gated  | Presigned S3 upload form (`{ contentType }`)     |
+| GET    | `/photos/:id` | gated  | Short-lived presigned download URL               |
+| DELETE | `/photos/:id` | gated  | Delete a photo                                   |
+
+### Photo uploads
+
+`POST /photos` with `{ "contentType": "image/jpeg" }` (also `image/png`,
+`image/webp`, `image/heic`) returns `{ id, upload: { url, fields }, maxBytes }`.
+The browser then uploads directly to S3:
+
+```js
+const form = new FormData();
+for (const [k, v] of Object.entries(upload.fields)) form.append(k, v);
+form.append('file', file); // must be last
+await fetch(upload.url, { method: 'POST', body: form }); // 204 on success
+```
+
+The signed policy fixes the key, type and size, so S3 rejects anything else.
+Presigning is done in `src/presign.mjs` (SigV4, no SDK) and is checked against
+AWS's published test vector.
 
 ### Optimistic concurrency
 
@@ -57,6 +77,8 @@ writes return the new version in an `ETag` header. The server owns keys,
 | `ALLOWED_EMAILS`    | Comma-separated emails allowed in (case-insensitive)           |
 | `REQUIRE_ALLOWLIST` | `true` (default) fails closed when no allow-list is configured |
 | `CORS_ORIGINS`      | Comma-separated allowed web origins                            |
+| `MEDIA_BUCKET`      | S3 bucket for photos (unset = photo routes return 501)         |
+| `MEDIA_MAX_BYTES`   | Largest upload the API will sign for (default 10 MB)           |
 | `ENV`               | `dev` \| `prod`                                                |
 
 Terraform wires all of these from `infra/modules/app-stack`.

@@ -10,6 +10,7 @@
 import { createApp } from './src/app.mjs';
 import { verifyJwt } from './src/auth.mjs';
 import { createDynamoData } from './src/ddb.mjs';
+import { createS3Media } from './src/media.mjs';
 
 const config = {
   env: process.env.ENV || 'dev',
@@ -26,6 +27,13 @@ const config = {
 
 const data = createDynamoData({ tableName: process.env.TABLE_NAME });
 
+// Photo storage (null when MEDIA_BUCKET is unset — the photo routes answer 501).
+const media = createS3Media({
+  bucket: process.env.MEDIA_BUCKET,
+  region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION,
+  maxBytes: Number(process.env.MEDIA_MAX_BYTES) || undefined,
+});
+
 // Bind the verifier to this pool's issuer/client so handlers just call verify(token).
 const verify = (token) => verifyJwt(token, {
   issuer: config.issuer,
@@ -34,7 +42,7 @@ const verify = (token) => verifyJwt(token, {
   allowedTokenUse: ['access', 'id'],
 });
 
-export const handler = createApp({ verify, data, config });
+export const handler = createApp({ verify, data, media, config });
 
 // Build the Cognito issuer URL from region + pool id if not supplied directly.
 function deriveIssuer() {

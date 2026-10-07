@@ -79,14 +79,24 @@ module "cognito" {
   tags                    = local.tags
 }
 
+module "media" {
+  source             = "../media"
+  bucket_name        = "${local.prefix}-media-${data.aws_caller_identity.current.account_id}"
+  cors_allow_origins = local.web_origins
+  enable_cors        = length(var.app_origins) > 0 || var.enable_frontend || local.custom_attached
+  tags               = local.tags
+}
+
 module "lambda" {
-  source        = "../lambda"
-  name          = "${local.prefix}-api"
-  source_dir    = var.api_source_dir
-  handler       = "index.handler"
-  table_name    = module.dynamodb.table_name
-  table_arn     = module.dynamodb.table_arn
-  table_gsi_arn = module.dynamodb.gsi1_arn
+  source           = "../lambda"
+  name             = "${local.prefix}-api"
+  source_dir       = var.api_source_dir
+  handler          = "index.handler"
+  table_name       = module.dynamodb.table_name
+  table_arn        = module.dynamodb.table_arn
+  table_gsi_arn    = module.dynamodb.gsi1_arn
+  enable_media     = true
+  media_bucket_arn = module.media.bucket_arn
   environment = {
     ENV               = var.env
     COGNITO_USER_POOL = module.cognito.user_pool_id
@@ -99,6 +109,9 @@ module "lambda" {
     ALLOWED_EMAILS    = join(",", var.allowed_emails)
     REQUIRE_ALLOWLIST = tostring(var.require_allowlist)
     CORS_ORIGINS      = join(",", local.web_origins)
+
+    MEDIA_BUCKET    = module.media.bucket_name
+    MEDIA_MAX_BYTES = tostring(var.media_max_bytes)
   }
   tags = local.tags
 }

@@ -1,5 +1,6 @@
 output "api_endpoint" { value = module.stack.api_endpoint }
 output "table_name" { value = module.stack.table_name }
+output "media_bucket" { value = module.stack.media_bucket }
 output "cognito_user_pool_id" { value = module.stack.cognito_user_pool_id }
 output "cognito_client_id" { value = module.stack.cognito_client_id }
 output "cognito_issuer" { value = module.stack.cognito_issuer }

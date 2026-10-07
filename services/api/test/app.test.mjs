@@ -6,11 +6,24 @@ import { signToken, jwksFetcher, memoryData, ISSUER, CLIENT_ID } from './helpers
 
 const SUB = 'sub-123';
 
-function buildApp({ allowedSubs = SUB, requireAllowlist = true, corsOrigins = ['https://wardrobe-builder.example'] } = {}) {
+function buildApp({ allowedSubs = SUB, requireAllowlist = true, corsOrigins = ['https://wardrobe-builder.example'], media = fakeMedia() } = {}) {
   const data = memoryData();
   const verify = (token) => verifyJwt(token, { issuer: ISSUER, clientIds: [CLIENT_ID], jwksFetcher: jwksFetcher() });
-  const app = createApp({ verify, data, config: { env: 'test', allowedSubs, requireAllowlist, corsOrigins } });
-  return { app, data };
+  const app = createApp({ verify, data, media, config: { env: 'test', allowedSubs, requireAllowlist, corsOrigins } });
+  return { app, data, media };
+}
+
+// Records which keys the API asks the media store to sign or delete.
+function fakeMedia() {
+  const removed = [];
+  return {
+    maxBytes: 1000,
+    expiresIn: 300,
+    removed,
+    uploadForm: (key, contentType) => ({ url: 'https://media.example/', fields: { key, 'Content-Type': contentType } }),
+    downloadUrl: (key) => `https://media.example/${key}?signed`,
+    remove: async (key) => { removed.push(key); return true; },
+  };
 }
 
 function req(method, path, { token, body, headers = {}, origin } = {}) {
@@ -143,4 +156,53 @@ test('malformed JSON body is 400', async () => {
     body: '{not json',
   });
   assert.equal(res.statusCode, 400);
+});
+
+test('POST /photos signs an upload under the caller\'s own prefix', async () => {
+  const { app } = buildApp();
+  const res = await app(req('POST', '/photos', { token: signToken({ sub: SUB }), body: { contentType: 'image/jpeg' } }));
+  assert.equal(res.statusCode, 201);
+  const body = JSON.parse(res.body);
+  assert.match(body.id, /^[0-9a-f-]{36}$/);
+  assert.equal(body.upload.fields.key, `users/${SUB}/photos/${body.id}`);
+  assert.equal(body.upload.fields['Content-Type'], 'image/jpeg');
+  assert.equal(body.maxBytes, 1000);
+});
+
+test('POST /photos rejects non-image content types', async () => {
+  const { app } = buildApp();
+  const res = await app(req('POST', '/photos', { token: signToken({ sub: SUB }), body: { contentType: 'text/html' } }));
+  assert.equal(res.statusCode, 400);
+});
+
+test('photo routes are gated', async () => {
+  const { app } = buildApp();
+  const res = await app(req('POST', '/photos', { body: { contentType: 'image/jpeg' } }));
+  assert.equal(res.statusCode, 401);
+});
+
+test('GET /photos/:id signs a download for the caller\'s key only', async () => {
+  const { app } = buildApp();
+  const res = await app(req('GET', '/photos/abc', { token: signToken({ sub: SUB }) }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).url, `https://media.example/users/${SUB}/photos/abc?signed`);
+});
+
+test('photo ids cannot escape the user prefix', async () => {
+  const { app } = buildApp();
+  const res = await app(req('GET', '/photos/..%2F..%2Fother', { token: signToken({ sub: SUB }) }));
+  assert.equal(res.statusCode, 400);
+});
+
+test('DELETE /photos/:id removes the caller\'s object', async () => {
+  const { app, media } = buildApp();
+  const res = await app(req('DELETE', '/photos/abc', { token: signToken({ sub: SUB }) }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(media.removed, [`users/${SUB}/photos/abc`]);
+});
+
+test('photo routes answer 501 when media storage is not configured', async () => {
+  const { app } = buildApp({ media: null });
+  const res = await app(req('POST', '/photos', { token: signToken({ sub: SUB }), body: { contentType: 'image/jpeg' } }));
+  assert.equal(res.statusCode, 501);
 });

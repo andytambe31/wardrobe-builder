@@ -89,6 +89,12 @@ variable "require_allowlist" {
   default     = true
 }
 
+variable "media_max_bytes" {
+  description = "Largest photo upload the API will sign for, in bytes (enforced by S3 via the POST policy)."
+  type        = number
+  default     = 10485760
+}
+
 variable "alert_email" {
   type    = string
   default = ""

@@ -50,6 +50,18 @@ variable "table_gsi_arn" {
   default     = ""
 }
 
+variable "enable_media" {
+  description = "Grant object access to media_bucket_arn under users/*. A bool so the decision is known at plan time (the ARN isn't until the bucket exists)."
+  type        = bool
+  default     = false
+}
+
+variable "media_bucket_arn" {
+  description = "Media bucket ARN (used when enable_media is true)."
+  type        = string
+  default     = ""
+}
+
 variable "environment" {
   description = "Extra environment variables for the function."
   type        = map(string)
