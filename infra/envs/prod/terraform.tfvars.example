@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and adjust.
+region          = "us-east-1"
+app_origins     = ["https://andytambe31.github.io"]
+enable_frontend = true
+# Exact OAuth redirect URLs (full app URL incl. path). Must match the SPA's
+# redirect_uri exactly. If you serve the app from CloudFront instead of Pages,
+# add that URL here too after the first apply.
+auth_callback_urls = ["https://andytambe31.github.io/wardrobe-builder/"]
+alert_email        = "you@example.com"
+budget_limit_usd   = 15
+# The single-user gate. Set your Cognito subject id and/or email; only these
+# principals get past the app's authorization check, even with a valid token.
+allowed_subs   = []
+allowed_emails = ["you@example.com"]
+# For a custom domain, create an ACM cert in us-east-1 and set:
+# frontend_domain_aliases      = ["app.example.com"]
+# frontend_acm_certificate_arn = "arn:aws:acm:us-east-1:...:certificate/..."

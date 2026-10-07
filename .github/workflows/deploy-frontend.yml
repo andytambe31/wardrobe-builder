@@ -1,0 +1,102 @@
+name: Deploy frontend (PWA → S3/CloudFront)
+
+# Publishes the static PWA to the env's S3 bucket and invalidates CloudFront.
+# Keyless via the same GitHub OIDC deploy role (runs from main, subject matches
+# the trust policy). Reads Cognito/API values from Terraform outputs and writes
+# them into config.js so the deployed app is self-configuring — no account
+# values committed to the repo.
+#
+# Run: Actions → Deploy frontend → Run workflow → pick env.
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Environment to deploy the frontend for
+        required: true
+        default: prod
+        type: choice
+        options: [dev, prod]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.9.8
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Pull the env's outputs from Terraform state (needs backend access only).
+      - name: Terraform init (read outputs)
+        working-directory: infra/envs/${{ inputs.env }}
+        run: |
+          cat > backend.hcl <<HCL
+          bucket         = "${{ vars.TF_STATE_BUCKET }}"
+          key            = "wardrobe-builder/${{ inputs.env }}/terraform.tfstate"
+          region         = "${{ env.AWS_REGION }}"
+          dynamodb_table = "${{ vars.TF_LOCK_TABLE }}"
+          encrypt        = true
+          HCL
+          terraform init -backend-config=backend.hcl
+
+      - name: Read outputs → build config.js
+        working-directory: infra/envs/${{ inputs.env }}
+        run: |
+          set -euo pipefail
+          BUCKET=$(terraform output -raw frontend_bucket)
+          DIST=$(terraform output -raw frontend_distribution_id)
+          REGION=$(terraform output -raw cognito_region)
+          POOL=$(terraform output -raw cognito_user_pool_id)
+          CLIENT=$(terraform output -raw cognito_client_id)
+          DOMAIN=$(terraform output -raw cognito_hosted_ui_domain)
+          API=$(terraform output -raw api_endpoint)
+          # Export for later steps
+          {
+            echo "BUCKET=$BUCKET"
+            echo "DIST=$DIST"
+          } >> "$GITHUB_ENV"
+          # Write the runtime config the PWA reads (window.__WARDROBE_CONFIG__).
+          cat > "$GITHUB_WORKSPACE/config.js" <<CFG
+          window.__WARDROBE_CONFIG__ = {
+            cognito: { region: "$REGION", userPoolId: "$POOL", clientId: "$CLIENT", domain: "$DOMAIN" },
+            apiBaseUrl: "$API"
+          };
+          CFG
+          echo "Generated config.js for ${{ inputs.env }} (bucket=$BUCKET, dist=$DIST)"
+
+      - name: Sync PWA to S3
+        # `Cache-Control: no-cache` = the browser MAY cache but MUST revalidate
+        # with the origin before using it (cheap 304 when unchanged, fresh bytes
+        # when changed). Without this, S3 objects ship with no cache header and
+        # browsers apply *heuristic* freshness — serving a stale module from disk
+        # for minutes/hours after a deploy, the classic installed-PWA staleness
+        # trap. CloudFront is still invalidated below; this fixes the last hop.
+        run: |
+          aws s3 sync . "s3://$BUCKET" --delete \
+            --cache-control "no-cache, must-revalidate" \
+            --exclude ".git/*" \
+            --exclude ".github/*" \
+            --exclude "infra/*" \
+            --exclude "services/*" \
+            --exclude "scratch-tests/*" \
+            --exclude "node_modules/*" \
+            --exclude "*.md" \
+            --exclude ".gitignore"
+
+      - name: Invalidate CloudFront
+        run: aws cloudfront create-invalidation --distribution-id "$DIST" --paths '/*'

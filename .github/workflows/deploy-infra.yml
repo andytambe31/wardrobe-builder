@@ -1,0 +1,105 @@
+name: Terraform (infra)
+
+# Keyless AWS auth via GitHub OIDC / WIF — no static credentials in GitHub.
+# The role is created by infra/bootstrap; set these repo Variables
+# (Settings → Secrets and variables → Actions → Variables):
+#   AWS_ROLE_ARN     the CI role ARN from bootstrap output
+#   TF_STATE_BUCKET  the state bucket from bootstrap output
+#   TF_LOCK_TABLE    the lock table from bootstrap output (default wardrobe-builder-tf-locks)
+#   ALERT_EMAIL      your email — used for alert subscription AND the allow-list
+#
+# The deploy role's trust policy only allows main, so PRs can't (and shouldn't)
+# assume it. PR checks therefore run WITHOUT AWS (fmt + validate). The real
+# plan/apply runs on workflow_dispatch, which executes from main and whose OIDC
+# subject the trust policy accepts.
+
+on:
+  pull_request:
+    paths: ["infra/**", "services/api/**", ".github/workflows/deploy-infra.yml"]
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Environment to apply
+        required: true
+        default: dev
+        type: choice
+        options: [dev, prod]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.9.8
+
+jobs:
+  # PR checks — no AWS. Proves the config is well-formed and formatted.
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [dev, prod]
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Format check (advisory)
+        continue-on-error: true
+        run: terraform fmt -check -recursive ../../
+      - name: Init (no backend — no AWS needed)
+        run: terraform init -backend=false
+      - run: terraform validate
+
+  # Real deploy — assumes the least-privilege deploy role via OIDC (only works
+  # from main, per the trust policy). Config parity: non-secret values come from
+  # the committed ci.auto.tfvars; the email is injected from a repo Variable so
+  # it never lives in git.
+  apply:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # NOTE: intentionally NOT using `environment:` here. A GitHub Environment
+    # changes the OIDC subject to `repo:.../:environment:<name>`, which the
+    # deploy role's trust policy (locked to `ref:refs/heads/main`) rejects. To
+    # add environment approval gates later, also allow the environment subjects
+    # in infra/bootstrap's trust policy and re-apply bootstrap.
+    defaults:
+      run:
+        working-directory: infra/envs/${{ inputs.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Write backend config
+        run: |
+          cat > backend.hcl <<HCL
+          bucket         = "${{ vars.TF_STATE_BUCKET }}"
+          key            = "wardrobe-builder/${{ inputs.env }}/terraform.tfstate"
+          region         = "${{ env.AWS_REGION }}"
+          dynamodb_table = "${{ vars.TF_LOCK_TABLE }}"
+          encrypt        = true
+          HCL
+      - run: terraform init -backend-config=backend.hcl
+      - name: Plan
+        run: |
+          terraform plan -input=false -no-color \
+            -var="alert_email=${{ vars.ALERT_EMAIL }}" \
+            -var='allowed_emails=["${{ vars.ALERT_EMAIL }}"]' \
+            -var='allowed_subs=["${{ vars.ALLOWED_SUBS }}"]'
+      - name: Apply
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="alert_email=${{ vars.ALERT_EMAIL }}" \
+            -var='allowed_emails=["${{ vars.ALERT_EMAIL }}"]' \
+            -var='allowed_subs=["${{ vars.ALLOWED_SUBS }}"]'

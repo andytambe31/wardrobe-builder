@@ -1,0 +1,21 @@
+# Terraform working files — never commit state, secrets, or generated artifacts.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Real (non-.example) local config — may contain account-specific values.
+backend.hcl
+*.tfvars
+!*.tfvars.example
+# ...but the committed, NON-secret shared config is tracked on purpose. Secrets
+# (e.g. your email) go in a gitignored secret.auto.tfvars, never here.
+!ci.auto.tfvars
+
+# Lambda build zips produced by archive_file.
+modules/lambda/.build/
+**/.build/
+
+# Plan output
+*.tfplan

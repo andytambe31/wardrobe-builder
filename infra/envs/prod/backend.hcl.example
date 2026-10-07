@@ -1,0 +1,7 @@
+# Copy to backend.hcl and fill in from `terraform output` of infra/bootstrap.
+#   terraform init -backend-config=backend.hcl
+bucket         = "REPLACE-with-your-state-bucket"
+key            = "wardrobe-builder/prod/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "wardrobe-builder-tf-locks"
+encrypt        = true
