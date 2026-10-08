@@ -95,6 +95,24 @@ variable "media_max_bytes" {
   default     = 10485760
 }
 
+variable "worker_timeout_seconds" {
+  description = "Background worker Lambda timeout (AI jobs). Max 900."
+  type        = number
+  default     = 300
+}
+
+variable "worker_memory_mb" {
+  description = "Worker Lambda memory. More memory also means more CPU (image handling)."
+  type        = number
+  default     = 1024
+}
+
+variable "worker_max_concurrency" {
+  description = "Most worker invocations running at once; caps parallel AI calls (SQS minimum 2)."
+  type        = number
+  default     = 2
+}
+
 variable "alert_email" {
   type    = string
   default = ""

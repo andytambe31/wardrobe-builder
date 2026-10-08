@@ -14,6 +14,22 @@ variable "table_name" {
   type = string
 }
 
+variable "enable_worker_alarms" {
+  description = "Create the worker-error and dead-letter-queue alarms."
+  type        = bool
+  default     = false
+}
+
+variable "worker_function_name" {
+  type    = string
+  default = ""
+}
+
+variable "dlq_name" {
+  type    = string
+  default = ""
+}
+
 variable "alert_email" {
   description = "Email for alarm + budget notifications. Empty = no email subscription."
   type        = string

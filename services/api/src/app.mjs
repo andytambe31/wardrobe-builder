@@ -9,7 +9,7 @@
 //      run the allow-list authz gate -> derive the owner sub.
 //   5. Parse the JSON body, build ctx, invoke the handler.
 //
-// Dependencies (verify, data, media) are injected so the whole app can be tested with
+// Dependencies (verify, data, media, jobs, secrets) are injected so the whole app can be tested with
 // no AWS and no network.
 import { createRouter } from './router.mjs';
 import { bearerToken, AuthError } from './auth.mjs';
@@ -17,7 +17,7 @@ import { authorize, ForbiddenError } from './authz.mjs';
 import { corsHeaders, json, error } from './response.mjs';
 import * as h from './handlers.mjs';
 
-export function createApp({ verify, data, media = null, config = {} }) {
+export function createApp({ verify, data, media = null, jobs = null, secrets = null, config = {} }) {
   const router = createRouter();
 
   router.get('/health', h.health, { public: true });
@@ -68,7 +68,7 @@ export function createApp({ verify, data, media = null, config = {} }) {
       return error(400, 'bad_json', 'request body is not valid JSON', cors);
     }
 
-    const ctx = { event: { ...event, headers }, params: route.params, body, sub, claims: claims || {}, data, media, config };
+    const ctx = { event: { ...event, headers }, params: route.params, body, sub, claims: claims || {}, data, media, jobs, secrets, config };
 
     try {
       const res = await route.handler(ctx);

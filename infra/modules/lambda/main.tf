@@ -74,6 +74,18 @@ data "aws_iam_policy_document" "perms" {
       resources = ["${statement.value}/users/*"]
     }
   }
+  # Caller-supplied grants (queue send/consume, secret reads, ...). The list's
+  # length is fixed in config, so this stays plan-safe even when the ARNs
+  # inside are only known after apply.
+  dynamic "statement" {
+    for_each = var.extra_statements
+    content {
+      sid       = statement.value.sid
+      effect    = "Allow"
+      actions   = statement.value.actions
+      resources = statement.value.resources
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "perms" {

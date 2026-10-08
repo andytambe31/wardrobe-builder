@@ -57,7 +57,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "media" {
     noncurrent_version_expiration {
       noncurrent_days = var.noncurrent_version_days
     }
-    expired_object_delete_marker = true
+    # Clean up delete markers once no older versions remain behind them.
+    expiration {
+      expired_object_delete_marker = true
+    }
   }
 
   rule {

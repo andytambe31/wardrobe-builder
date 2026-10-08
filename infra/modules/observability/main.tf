@@ -34,6 +34,43 @@ resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
   tags                = var.tags
 }
 
+# Worker errors and dead-lettered jobs. Count'd on a plain bool so the decision
+# is known at plan time.
+resource "aws_cloudwatch_metric_alarm" "worker_errors" {
+  count               = var.enable_worker_alarms ? 1 : 0
+  alarm_name          = "${var.name}-worker-errors"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  dimensions          = { FunctionName = var.worker_function_name }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+  tags                = var.tags
+}
+
+# Any message in the DLQ is a job that failed every retry — always worth a look.
+resource "aws_cloudwatch_metric_alarm" "dlq_depth" {
+  count               = var.enable_worker_alarms ? 1 : 0
+  alarm_name          = "${var.name}-jobs-dlq"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  dimensions          = { QueueName = var.dlq_name }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+  tags                = var.tags
+}
+
 # API Gateway 5xx.
 resource "aws_cloudwatch_metric_alarm" "api_5xx" {
   alarm_name          = "${var.name}-api-5xx"

@@ -4,8 +4,8 @@
 # are NOT here: CI injects them from the ALERT_EMAIL repo Variable via -var;
 # locally, put them in a gitignored secret.auto.tfvars.
 region             = "us-east-1"
-app_origins        = ["http://localhost:8099"]
-auth_callback_urls = ["http://localhost:8099/"]
+app_origins        = ["http://localhost:5173", "http://localhost:8099"]
+auth_callback_urls = ["http://localhost:5173/", "http://localhost:8099/"]
 enable_frontend    = true
 budget_limit_usd   = 5
 allowed_subs       = []

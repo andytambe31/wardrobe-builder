@@ -43,6 +43,8 @@ data "aws_iam_policy_document" "deploy_guardrail" {
       "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE",
       "cloudfront:Create*", "cloudfront:Delete*", "cloudfront:Update*",
       "cloudfront:TagResource", "cloudfront:UntagResource", "cloudfront:Associate*", "cloudfront:Copy*",
+      "sqs:CreateQueue", "sqs:DeleteQueue", "sqs:SetQueueAttributes", "sqs:PurgeQueue",
+      "sqs:AddPermission", "sqs:RemovePermission", "sqs:TagQueue", "sqs:UntagQueue",
       "sns:Create*", "sns:Delete*", "sns:Set*", "sns:Subscribe", "sns:Unsubscribe",
       "sns:Add*", "sns:Remove*", "sns:TagResource", "sns:UntagResource",
       "cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:SetAlarmState",

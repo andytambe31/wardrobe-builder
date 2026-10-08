@@ -62,6 +62,16 @@ variable "media_bucket_arn" {
   default     = ""
 }
 
+variable "extra_statements" {
+  description = "Additional IAM Allow statements for the function role."
+  type = list(object({
+    sid       = string
+    actions   = list(string)
+    resources = list(string)
+  }))
+  default = []
+}
+
 variable "environment" {
   description = "Extra environment variables for the function."
   type        = map(string)

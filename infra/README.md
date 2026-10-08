@@ -9,21 +9,38 @@ least-privilege IAM, observability, and dev/prod separation.
 ## Architecture
 
 ```
- PWA ──▶ CloudFront + S3 (private, OAC)            [modules/frontend]  (optional)
-   │  JWT (Cognito)
+ web/ app ──▶ CloudFront + S3 (private, OAC)        [modules/frontend]
+   │  reads /config.js (written at deploy); JWT from Cognito Hosted UI + PKCE
+   │
+   ├──── photos: presigned POST/GET ──────────────▶ S3 media bucket   [modules/media]
+   │                                                (private, users/<sub>/photos/*)
    ▼
- API Gateway HTTP API ──▶ Cognito JWT authorizer   [modules/apigateway, cognito]
+ API Gateway HTTP API ──▶ Cognito JWT authorizer    [modules/apigateway, cognito]
    │
    ▼
- Lambda (Node 20) ──▶ DynamoDB single-table        [modules/lambda, dynamodb]
-   │                    (PK=USER#sub, GSI1, PITR, deletion protection)
-   ├─ signs uploads/downloads ──▶ S3 media bucket   [modules/media]
-   │    (private, users/<sub>/photos/*; browser POSTs/GETs via presigned forms/URLs)
-   └─ CloudWatch logs/alarms + budget              [modules/observability]
+ API Lambda (index.mjs, ≤29s) ─┬─▶ DynamoDB single-table   [modules/dynamodb]
+   │                           ├─▶ SSM: AI API key (read-only, runtime)
+   │ enqueue slow work         └─▶ S3 media (users/*)
+   ▼
+ SQS jobs queue ──▶ Worker Lambda (worker.mjs, ≤5 min) ──▶ same DynamoDB/S3/key
+   └─ after 3 failures ──▶ dead-letter queue        [modules/jobs]
 
+ CloudWatch alarms (API/worker errors, 5xx, DLQ, throttles) + budget  [modules/observability]
  State:  S3 + DynamoDB lock                         [bootstrap]
- CI/CD:  GitHub Actions → AWS via OIDC/WIF          [.github/workflows/deploy-infra.yml]
+ CI/CD:  GitHub Actions → AWS via OIDC              [.github/workflows/]
 ```
+
+How a feature uses this:
+
+- **Fast request** (CRUD, wardrobe items, profile): an API route, done.
+- **Photo** (body shots, garments): `POST /photos` → the browser uploads
+  straight to S3 → the API stores the photo id in DynamoDB.
+- **AI work** (body-type analysis, outfit suggestions, style reports): the API
+  route calls `ctx.jobs.enqueue(type, ctx.sub, input)` and returns `202` with a
+  job id; a handler registered in `worker.mjs` does the model call (reading the
+  key with `secrets.get(aiApiKeyParam)` and photos from S3), writes the result
+  to DynamoDB, and the frontend polls for it. API Gateway cuts any request off
+  at 30s, so model calls that may run long belong on the queue.
 
 ## Layout
 
@@ -32,9 +49,10 @@ infra/
   bootstrap/            # remote state bucket + lock + GitHub OIDC role (run ONCE, local state)
   modules/
     app-stack/          # composes the leaf modules for one environment
-    dynamodb/  cognito/  lambda/  apigateway/  frontend/  media/  observability/
+    dynamodb/  cognito/  lambda/  apigateway/  frontend/  media/  jobs/  observability/
   envs/dev/  envs/prod/ # thin roots: provider + backend + one app-stack call
-services/api/           # the Lambda source (auth/authz platform + generic owner-scoped CRUD)
+services/api/           # Lambda source for both functions: index.mjs (API), worker.mjs (jobs)
+web/                    # the frontend (placeholder page for now; see web/README.md)
 ```
 
 ## One-time bootstrap
@@ -66,6 +84,17 @@ terraform apply
 terraform output   # api_endpoint, cognito ids, frontend_domain
 ```
 
+Set the AI provider key. Terraform deliberately doesn't manage this parameter
+(it would read the decrypted value back into state), so create it once per env:
+
+```bash
+aws ssm put-parameter --type SecureString --overwrite \
+  --name "$(terraform output -raw ai_api_key_parameter)" --value '<your key>'
+```
+
+Until it exists, anything that calls `secrets.get(...)` fails with a clear
+"secret ... is not set" error; the rest of the app works.
+
 Create your user (self-signup is off):
 
 ```bash
@@ -92,14 +121,9 @@ full app URL incl. path — the SPA's `redirect_uri` must match exactly), and th
 API's CORS uses `app_origins` (bare origins). Lock the app to yourself by setting
 `allowed_subs` / `allowed_emails` (the API fails closed with neither set).
 
-If `enable_frontend = true`, publish the PWA:
-
-```bash
-aws s3 sync ../../../ "s3://$(terraform output -raw frontend_bucket)" \
-  --exclude '.git/*' --exclude 'infra/*' --exclude 'services/*' --exclude 'scratch-tests/*'
-aws cloudfront create-invalidation \
-  --distribution-id "$(terraform output -raw frontend_distribution_id)" --paths '/*'
-```
+Publish the frontend with the **Frontend** workflow (Actions → Frontend → Run
+workflow → env). It builds `web/`, writes `config.js` from these outputs,
+uploads to S3, invalidates CloudFront and checks the site is live.
 
 ## CI/CD
 
@@ -112,8 +136,21 @@ aws cloudfront create-invalidation \
   API tests first, then `plan` + `apply` through the OIDC role (no stored keys),
   then a smoke test that `GET /health` on the new API returns 200.
 
-It won't run on ordinary pushes, so nothing deploys until you wire the AWS
-account and trigger it.
+`.github/workflows/deploy-frontend.yml`:
+
+- **On a PR** touching `web/**`: builds the app (and runs its `lint`/`test`
+  scripts if defined). No AWS.
+- **On workflow_dispatch**: build, write `config.js`, sync to S3 (hashed
+  `assets/` cached for a year, everything else revalidated on every load),
+  invalidate CloudFront, then fetch the live site.
+
+Neither runs on ordinary pushes, so nothing deploys until you wire the AWS
+account and trigger it. Deploy order for a fresh env: **bootstrap** (once) →
+**Terraform (infra)** → set the AI key → **Frontend**.
+
+If you ran bootstrap before the job queue was added, re-run
+`terraform apply` in `infra/bootstrap` once: the deploy role needs the new SQS
+and event-source-mapping permissions.
 
 ## Notes / deliberate choices
 

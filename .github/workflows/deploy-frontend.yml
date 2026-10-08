@@ -1,14 +1,24 @@
-name: Deploy frontend (PWA → S3/CloudFront)
+name: Frontend (web/ → S3/CloudFront)
 
-# Publishes the static PWA to the env's S3 bucket and invalidates CloudFront.
-# Keyless via the same GitHub OIDC deploy role (runs from main, subject matches
-# the trust policy). Reads Cognito/API values from Terraform outputs and writes
-# them into config.js so the deployed app is self-configuring — no account
-# values committed to the repo.
+# Builds the web app in web/ and publishes it to the env's private S3 bucket
+# behind CloudFront.
 #
-# Run: Actions → Deploy frontend → Run workflow → pick env.
+#   • web/package.json present → `npm ci && npm run build`, publish web/dist
+#     (any bundler works: Vite, Next static export, ... — just emit to dist/).
+#   • no package.json          → publish web/ as plain static files.
+#
+# The build is environment-agnostic: the deploy writes config.js (Cognito +
+# API URL from Terraform outputs) into the published site, and the app reads
+# window.__WARDROBE_CONFIG__ at runtime. One build, any env, no account values
+# in git.
+#
+# PRs touching web/ run the build only (no AWS). Deploys are manual:
+# Actions → Frontend → Run workflow → pick env. Keyless via the GitHub OIDC
+# deploy role (runs from main, matching the role's trust policy).
 
 on:
+  pull_request:
+    paths: ["web/**", ".github/workflows/deploy-frontend.yml"]
   workflow_dispatch:
     inputs:
       env:
@@ -27,13 +37,52 @@ env:
   TF_VERSION: 1.9.8
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      publish_dir: ${{ steps.build.outputs.publish_dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build
+        id: build
+        working-directory: web
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            npm ci
+            # Lint/tests run here too when the app defines them.
+            npm run --if-present lint
+            npm run --if-present test
+            npm run build
+            DIR=web/dist
+          else
+            DIR=web
+          fi
+          test -f "$GITHUB_WORKSPACE/$DIR/index.html" || { echo "::error::$DIR/index.html missing"; exit 1; }
+          echo "publish_dir=$DIR" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: ${{ steps.build.outputs.publish_dir }}
+          if-no-files-found: error
+
   deploy:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -54,49 +103,59 @@ jobs:
           HCL
           terraform init -backend-config=backend.hcl
 
-      - name: Read outputs → build config.js
+      - name: Read outputs → write config.js
         working-directory: infra/envs/${{ inputs.env }}
         run: |
           set -euo pipefail
           BUCKET=$(terraform output -raw frontend_bucket)
           DIST=$(terraform output -raw frontend_distribution_id)
+          DOMAIN=$(terraform output -raw frontend_domain)
           REGION=$(terraform output -raw cognito_region)
           POOL=$(terraform output -raw cognito_user_pool_id)
           CLIENT=$(terraform output -raw cognito_client_id)
-          DOMAIN=$(terraform output -raw cognito_hosted_ui_domain)
+          COGNITO_DOMAIN=$(terraform output -raw cognito_hosted_ui_domain)
           API=$(terraform output -raw api_endpoint)
-          # Export for later steps
           {
             echo "BUCKET=$BUCKET"
             echo "DIST=$DIST"
+            echo "DOMAIN=$DOMAIN"
           } >> "$GITHUB_ENV"
-          # Write the runtime config the PWA reads (window.__WARDROBE_CONFIG__).
-          cat > "$GITHUB_WORKSPACE/config.js" <<CFG
+          cat > "$GITHUB_WORKSPACE/site/config.js" <<CFG
           window.__WARDROBE_CONFIG__ = {
-            cognito: { region: "$REGION", userPoolId: "$POOL", clientId: "$CLIENT", domain: "$DOMAIN" },
+            env: "${{ inputs.env }}",
+            cognito: { region: "$REGION", userPoolId: "$POOL", clientId: "$CLIENT", domain: "$COGNITO_DOMAIN" },
             apiBaseUrl: "$API"
           };
           CFG
           echo "Generated config.js for ${{ inputs.env }} (bucket=$BUCKET, dist=$DIST)"
 
-      - name: Sync PWA to S3
-        # `Cache-Control: no-cache` = the browser MAY cache but MUST revalidate
-        # with the origin before using it (cheap 304 when unchanged, fresh bytes
-        # when changed). Without this, S3 objects ship with no cache header and
-        # browsers apply *heuristic* freshness — serving a stale module from disk
-        # for minutes/hours after a deploy, the classic installed-PWA staleness
-        # trap. CloudFront is still invalidated below; this fixes the last hop.
+      # Two cache policies:
+      #   assets/  — content-hashed bundler output (Vite's default dir): cache
+      #              for a year. Never --delete'd, so a tab still running the
+      #              previous build can lazy-load its old chunks after a deploy.
+      #   the rest — index.html, config.js, manifest, service worker: no-cache,
+      #              i.e. browsers revalidate every time (cheap 304 when
+      #              unchanged), so a deploy is picked up on the next load.
+      - name: Sync to S3
+        working-directory: site
         run: |
+          set -euo pipefail
+          if [ -d assets ]; then
+            aws s3 sync assets "s3://$BUCKET/assets" \
+              --cache-control "public, max-age=31536000, immutable"
+          fi
           aws s3 sync . "s3://$BUCKET" --delete \
-            --cache-control "no-cache, must-revalidate" \
-            --exclude ".git/*" \
-            --exclude ".github/*" \
-            --exclude "infra/*" \
-            --exclude "services/*" \
-            --exclude "scratch-tests/*" \
-            --exclude "node_modules/*" \
-            --exclude "*.md" \
-            --exclude ".gitignore"
+            --exclude "assets/*" \
+            --cache-control "no-cache, must-revalidate"
 
       - name: Invalidate CloudFront
-        run: aws cloudfront create-invalidation --distribution-id "$DIST" --paths '/*'
+        run: |
+          ID=$(aws cloudfront create-invalidation --distribution-id "$DIST" --paths '/*' --query 'Invalidation.Id' --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DIST" --id "$ID"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null "https://$DOMAIN/"
+          curl -fsS "https://$DOMAIN/config.js" | grep -q "__WARDROBE_CONFIG__"
+          echo "live: https://$DOMAIN/"

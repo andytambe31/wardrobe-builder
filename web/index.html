@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wardrobe Builder</title>
+  <!-- Written at deploy time from Terraform outputs (Cognito + API URL). -->
+  <script src="/config.js"></script>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+    main { max-width: 32rem; }
+    code { font-size: .9em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Wardrobe Builder</h1>
+    <p>Placeholder page: the deploy pipeline works. Replace <code>web/</code> with the real app.</p>
+    <p>API: <span id="api">checking…</span></p>
+  </main>
+  <script>
+    // Proves the frontend → API wiring end to end via the public /health route.
+    const cfg = window.__WARDROBE_CONFIG__;
+    const el = document.getElementById('api');
+    if (!cfg) {
+      el.textContent = 'no config.js (not deployed through the pipeline)';
+    } else {
+      fetch(cfg.apiBaseUrl + '/health')
+        .then((r) => r.json())
+        .then((b) => { el.textContent = `healthy (${b.env})`; })
+        .catch(() => { el.textContent = 'unreachable'; });
+    }
+  </script>
+</body>
+</html>

@@ -1,6 +1,9 @@
 output "api_endpoint" { value = module.stack.api_endpoint }
 output "table_name" { value = module.stack.table_name }
 output "media_bucket" { value = module.stack.media_bucket }
+output "jobs_queue_url" { value = module.stack.jobs_queue_url }
+output "jobs_dlq_name" { value = module.stack.jobs_dlq_name }
+output "ai_api_key_parameter" { value = module.stack.ai_api_key_parameter }
 output "cognito_user_pool_id" { value = module.stack.cognito_user_pool_id }
 output "cognito_client_id" { value = module.stack.cognito_client_id }
 output "cognito_issuer" { value = module.stack.cognito_issuer }

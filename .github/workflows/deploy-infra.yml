@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Install dependencies
+        run: if [ -f package-lock.json ]; then npm ci; fi
       - run: npm test
 
   # PR checks — no AWS. Proves the config is well-formed and formatted.
@@ -91,6 +93,18 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # The wrapper echoes extra lines into stdout, which would corrupt
+          # $(terraform output -raw ...) in the smoke test below.
+          terraform_wrapper: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Terraform zips services/api as-is for both Lambdas (API + worker), so
+      # runtime npm dependencies must be installed first. Dev dependencies are
+      # left out to keep the package small.
+      - name: Install API runtime dependencies
+        working-directory: services/api
+        run: if [ -f package-lock.json ]; then npm ci --omit=dev; fi
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

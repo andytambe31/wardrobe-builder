@@ -213,10 +213,34 @@ data "aws_iam_policy_document" "ci_deploy" {
     actions   = ["lambda:*"]
     resources = ["arn:aws:lambda:*:${local.acct}:function:${local.proj}-*"]
   }
+  # Queue -> worker triggers. CreateEventSourceMapping has no resource type, so
+  # it's scoped by the target function instead; the mapping ARNs themselves are
+  # random UUIDs.
+  statement {
+    sid       = "LambdaEventSourceMappingCreate"
+    effect    = "Allow"
+    actions   = ["lambda:CreateEventSourceMapping"]
+    resources = ["*"]
+    condition {
+      test     = "ArnLike"
+      variable = "lambda:FunctionArn"
+      values   = ["arn:aws:lambda:*:${local.acct}:function:${local.proj}-*"]
+    }
+  }
+  statement {
+    sid    = "LambdaEventSourceMappings"
+    effect = "Allow"
+    actions = [
+      "lambda:GetEventSourceMapping", "lambda:UpdateEventSourceMapping",
+      "lambda:DeleteEventSourceMapping", "lambda:TagResource",
+      "lambda:UntagResource", "lambda:ListTags",
+    ]
+    resources = ["arn:aws:lambda:*:${local.acct}:event-source-mapping:*"]
+  }
   statement {
     sid       = "LambdaAccount"
     effect    = "Allow"
-    actions   = ["lambda:GetAccountSettings", "lambda:ListFunctions"]
+    actions   = ["lambda:GetAccountSettings", "lambda:ListFunctions", "lambda:ListEventSourceMappings"]
     resources = ["*"]
   }
   statement {
@@ -257,6 +281,12 @@ data "aws_iam_policy_document" "ci_deploy" {
       "arn:aws:s3:::${local.proj}-*",
       "arn:aws:s3:::${local.proj}-*/*",
     ]
+  }
+  statement {
+    sid       = "SqsJobQueues"
+    effect    = "Allow"
+    actions   = ["sqs:*"]
+    resources = ["arn:aws:sqs:*:${local.acct}:${local.proj}-*"]
   }
   statement {
     sid       = "SnsAlerts"

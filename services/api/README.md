@@ -65,6 +65,34 @@ write is rejected with `409 version_conflict` — re-fetch and retry. Successful
 writes return the new version in an `ETag` header. The server owns keys,
 `version`, and `updatedAt`; any of those sent in a request body are ignored.
 
+## Background jobs (worker.mjs)
+
+Work that can take longer than API Gateway's 30s limit (AI calls, image
+processing) runs on the worker Lambda. From a route:
+
+```js
+const job = await ctx.jobs.enqueue('analyze-photo', ctx.sub, { photoId });
+return json(202, { jobId: job.id });
+```
+
+Then register the handler in `worker.mjs`:
+
+```js
+async 'analyze-photo'(job, deps) {
+  const key = await deps.secrets.get(deps.aiApiKeyParam);
+  // ...call the model, then write the result under job.sub with deps.data
+}
+```
+
+A handler that throws is retried (3 attempts) and then moved to the
+dead-letter queue, which raises an alarm. A `ping` job type is built in for
+checking the queue → worker path. `src/jobs.mjs` and `src/secrets.mjs` are
+covered by `test/jobs.test.mjs`.
+
+Runtime npm dependencies (an AI SDK, image libraries) can be added to
+`package.json`; CI runs `npm ci --omit=dev` before Terraform zips this
+directory. `@aws-sdk/*` comes with the Lambda runtime, so don't add it.
+
 ## Environment variables
 
 | Var                 | Meaning                                                        |
@@ -79,6 +107,8 @@ writes return the new version in an `ETag` header. The server owns keys,
 | `CORS_ORIGINS`      | Comma-separated allowed web origins                            |
 | `MEDIA_BUCKET`      | S3 bucket for photos (unset = photo routes return 501)         |
 | `MEDIA_MAX_BYTES`   | Largest upload the API will sign for (default 10 MB)           |
+| `JOBS_QUEUE_URL`    | SQS queue for background jobs (unset = `ctx.jobs` is null)     |
+| `AI_API_KEY_PARAM`  | SSM SecureString parameter name holding the AI provider key    |
 | `ENV`               | `dev` \| `prod`                                                |
 
 Terraform wires all of these from `infra/modules/app-stack`.

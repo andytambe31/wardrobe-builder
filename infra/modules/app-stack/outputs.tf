@@ -27,6 +27,20 @@ output "media_bucket" {
   value       = module.media.bucket_name
 }
 
+output "jobs_queue_url" {
+  value = module.jobs.queue_url
+}
+
+output "jobs_dlq_name" {
+  description = "Dead-letter queue: jobs that failed every retry. Inspect, then redrive from the SQS console."
+  value       = module.jobs.dlq_name
+}
+
+output "ai_api_key_parameter" {
+  description = "SSM parameter to put the AI API key in (see the README)."
+  value       = local.ai_api_key_param
+}
+
 output "table_name" {
   value = module.dynamodb.table_name
 }
