@@ -27,10 +27,13 @@ style, with AI help on top of your own photos and wardrobe.
 
 ## Deploying
 
-1. One-time: `infra/bootstrap` (state bucket, lock table, GitHub deploy role),
-   then set the repo Variables it prints.
-2. **Actions → Terraform (infra)** → env.
-3. Put the AI key in SSM (command in [infra/README.md](infra/README.md)).
-4. **Actions → Frontend** → env.
+Merging to `main` deploys automatically: dev first, then prod, each checked
+with smoke tests, and plans that would delete resources are held for a manual
+apply. One-time setup:
 
-Details in [infra/README.md](infra/README.md).
+1. Run `infra/bootstrap` (state bucket, lock table, GitHub deploy role), then
+   set the repo Variables it prints.
+2. Merge (or run **Actions → Deploy (main)**) for the first deploy.
+3. Put the AI key in SSM (command in [infra/README.md](infra/README.md)).
+
+Details in [infra/README.md](infra/README.md#cicd).

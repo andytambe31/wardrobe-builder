@@ -1,21 +1,23 @@
 name: Terraform (infra)
 
-# Keyless AWS auth via GitHub OIDC / WIF — no static credentials in GitHub.
+# Keyless AWS auth via GitHub OIDC — no static credentials in GitHub.
 # The role is created by infra/bootstrap; set these repo Variables
 # (Settings → Secrets and variables → Actions → Variables):
 #   AWS_ROLE_ARN     the CI role ARN from bootstrap output
 #   TF_STATE_BUCKET  the state bucket from bootstrap output
 #   TF_LOCK_TABLE    the lock table from bootstrap output (default wardrobe-builder-tf-locks)
 #   ALERT_EMAIL      your email — used for alert subscription AND the allow-list
+#   ALLOWED_SUBS     (optional) your Cognito sub, for the allow-list
 #
 # The deploy role's trust policy only allows main, so PRs can't (and shouldn't)
-# assume it. PR checks therefore run WITHOUT AWS (fmt + validate). The real
-# plan/apply runs on workflow_dispatch, which executes from main and whose OIDC
-# subject the trust policy accepts.
+# assume it. PR checks therefore run WITHOUT AWS (API tests, fmt, validate).
+# Merges to main deploy automatically through deploy-main.yml; the manual run
+# here is for re-applying by hand, or for approving a plan that deletes or
+# replaces resources (allow_destroy). The steps live in _terraform-apply.yml.
 
 on:
   pull_request:
-    paths: ["infra/**", "services/api/**", ".github/workflows/deploy-infra.yml"]
+    paths: ["infra/**", "services/api/**", ".github/workflows/deploy-infra.yml", ".github/workflows/_terraform-apply.yml"]
   workflow_dispatch:
     inputs:
       env:
@@ -24,19 +26,22 @@ on:
         default: dev
         type: choice
         options: [dev, prod]
+      allow_destroy:
+        description: Apply even if the plan deletes or replaces resources
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  AWS_REGION: us-east-1
   TF_VERSION: 1.9.8
 
 jobs:
   # API unit tests — no AWS, no network (in-memory data layer + local JWT keys).
-  # Runs on PRs and gates the apply, so a broken Lambda never ships.
   api-test:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -50,7 +55,7 @@ jobs:
         run: if [ -f package-lock.json ]; then npm ci; fi
       - run: npm test
 
-  # PR checks — no AWS. Proves the config is well-formed and formatted.
+  # Proves the config is well-formed and formatted — no AWS needed.
   validate:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -72,76 +77,12 @@ jobs:
         run: terraform init -backend=false
       - run: terraform validate
 
-  # Real deploy — assumes the least-privilege deploy role via OIDC (only works
-  # from main, per the trust policy). Config parity: non-secret values come from
-  # the committed ci.auto.tfvars; the email is injected from a repo Variable so
-  # it never lives in git.
   apply:
     if: github.event_name == 'workflow_dispatch'
-    needs: api-test
-    runs-on: ubuntu-latest
-    # NOTE: intentionally NOT using `environment:` here. A GitHub Environment
-    # changes the OIDC subject to `repo:.../:environment:<name>`, which the
-    # deploy role's trust policy (locked to `ref:refs/heads/main`) rejects. To
-    # add environment approval gates later, also allow the environment subjects
-    # in infra/bootstrap's trust policy and re-apply bootstrap.
-    defaults:
-      run:
-        working-directory: infra/envs/${{ inputs.env }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          # The wrapper echoes extra lines into stdout, which would corrupt
-          # $(terraform output -raw ...) in the smoke test below.
-          terraform_wrapper: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      # Terraform zips services/api as-is for both Lambdas (API + worker), so
-      # runtime npm dependencies must be installed first. Dev dependencies are
-      # left out to keep the package small.
-      - name: Install API runtime dependencies
-        working-directory: services/api
-        run: if [ -f package-lock.json ]; then npm ci --omit=dev; fi
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - name: Write backend config
-        run: |
-          cat > backend.hcl <<HCL
-          bucket         = "${{ vars.TF_STATE_BUCKET }}"
-          key            = "wardrobe-builder/${{ inputs.env }}/terraform.tfstate"
-          region         = "${{ env.AWS_REGION }}"
-          dynamodb_table = "${{ vars.TF_LOCK_TABLE }}"
-          encrypt        = true
-          HCL
-      - run: terraform init -backend-config=backend.hcl
-      - name: Plan
-        run: |
-          terraform plan -input=false -no-color \
-            -var="alert_email=${{ vars.ALERT_EMAIL }}" \
-            -var='allowed_emails=["${{ vars.ALERT_EMAIL }}"]' \
-            -var='allowed_subs=["${{ vars.ALLOWED_SUBS }}"]'
-      - name: Apply
-        run: |
-          terraform apply -input=false -auto-approve \
-            -var="alert_email=${{ vars.ALERT_EMAIL }}" \
-            -var='allowed_emails=["${{ vars.ALERT_EMAIL }}"]' \
-            -var='allowed_subs=["${{ vars.ALLOWED_SUBS }}"]'
-
-      # Post-deploy smoke test: the public /health route must answer 200 from
-      # the freshly applied Lambda. Retries cover API Gateway/Lambda propagation.
-      - name: Smoke test /health
-        run: |
-          set -euo pipefail
-          API=$(terraform output -raw api_endpoint)
-          for i in 1 2 3 4 5 6; do
-            if curl -fsS "$API/health"; then echo; echo "healthy: $API"; exit 0; fi
-            echo "attempt $i failed; retrying in 10s"; sleep 10
-          done
-          echo "::error::$API/health did not return 200 after deploy"
-          exit 1
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      env: ${{ inputs.env }}
+      allow_destroy: ${{ inputs.allow_destroy }}

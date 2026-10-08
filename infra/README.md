@@ -127,26 +127,36 @@ uploads to S3, invalidates CloudFront and checks the site is live.
 
 ## CI/CD
 
-`.github/workflows/deploy-infra.yml`:
+| Workflow | Trigger | What it does |
+|---|---|---|
+| **Deploy (main)** `deploy-main.yml` | every push/merge to `main` (docs-only changes skipped) | dev infra → dev frontend → prod infra → prod frontend, each stage only if the previous one (and its smoke test) passed |
+| **Terraform (infra)** `deploy-infra.yml` | PRs touching `infra/`, `services/api/` | API tests, `fmt` (advisory), `validate` for dev + prod. No AWS. |
+| | manual | apply one env; tick `allow_destroy` to approve a plan that deletes/replaces resources |
+| **Frontend** `deploy-frontend.yml` | PRs touching `web/` | build (+ `lint`/`test` if defined). No AWS. |
+| | manual | redeploy one env's frontend |
 
-- **On a PR** touching `infra/**` or `services/api/**`: the API unit tests, plus
-  `fmt` (advisory) and `validate` for dev and prod. No AWS access — PRs can't
-  assume the deploy role.
-- **On workflow_dispatch** (Actions → Terraform (infra) → Run workflow → env):
-  API tests first, then `plan` + `apply` through the OIDC role (no stored keys),
-  then a smoke test that `GET /health` on the new API returns 200.
+The deploy steps live in two reusable workflows that the pipeline and the
+manual runs share: `_terraform-apply.yml` (API tests → plan → safety check →
+apply the saved plan → `GET /health`) and `_frontend-deploy.yml` (build →
+`config.js` from Terraform outputs → S3 sync → CloudFront invalidation → live
+check).
 
-`.github/workflows/deploy-frontend.yml`:
+Guard rails on the automatic pipeline:
 
-- **On a PR** touching `web/**`: builds the app (and runs its `lint`/`test`
-  scripts if defined). No AWS.
-- **On workflow_dispatch**: build, write `config.js`, sync to S3 (hashed
-  `assets/` cached for a year, everything else revalidated on every load),
-  invalidate CloudFront, then fetch the live site.
+- **No surprise deletions.** A plan that deletes or replaces any resource is
+  not applied; the run fails and its summary page lists what would go. If it's
+  intended, apply it with **Terraform (infra)** → env → `allow_destroy`.
+- **Dev first.** Prod only deploys after dev's apply, API smoke test, frontend
+  deploy and site check all pass.
+- **One deploy per env at a time**, shared with the manual workflows (plus the
+  Terraform state lock).
+- **Kill switch for prod:** set the repo Variable `AUTO_DEPLOY_PROD=false` to
+  stop the pipeline after dev.
+- **Not wired yet = no-op.** Until the AWS repo Variables exist, the pipeline
+  skips itself with a notice instead of failing every merge.
 
-Neither runs on ordinary pushes, so nothing deploys until you wire the AWS
-account and trigger it. Deploy order for a fresh env: **bootstrap** (once) →
-**Terraform (infra)** → set the AI key → **Frontend**.
+Deploy order for a fresh env: **bootstrap** (once) → set repo Variables → AI key
+(after the first infra apply) → merges deploy from then on.
 
 If you ran bootstrap before the job queue was added, re-run
 `terraform apply` in `infra/bootstrap` once: the deploy role needs the new SQS

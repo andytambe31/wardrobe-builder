@@ -1,0 +1,155 @@
+name: terraform-apply (reusable)
+
+# Applies infra/envs/<env> through the GitHub OIDC deploy role, then
+# smoke-tests the API. Called by deploy-main.yml (every merge to main) and by
+# deploy-infra.yml (manual runs). Callers must grant `id-token: write`.
+#
+# Safety:
+#   • the API unit tests gate the apply;
+#   • the saved plan is what gets applied (no re-plan between review and apply)
+#     and is summarised on the run page;
+#   • unless allow_destroy is true, a plan that deletes or replaces anything
+#     fails instead of applying — automatic deploys never destroy resources;
+#   • one apply per env at a time (concurrency), on top of the state lock.
+
+on:
+  workflow_call:
+    inputs:
+      env:
+        description: dev | prod
+        required: true
+        type: string
+      allow_destroy:
+        description: Apply even if the plan deletes or replaces resources.
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      api_endpoint:
+        description: Base URL of the deployed API.
+        value: ${{ jobs.apply.outputs.api_endpoint }}
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.9.8
+
+jobs:
+  # API unit tests — no AWS, no network (in-memory data layer + local JWT keys).
+  api-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: if [ -f package-lock.json ]; then npm ci; fi
+      - run: npm test
+
+  # Non-secret config comes from the committed ci.auto.tfvars; the email is
+  # injected from a repo Variable so it never lives in git.
+  apply:
+    needs: api-test
+    runs-on: ubuntu-latest
+    # NOTE: intentionally NOT using `environment:` here. A GitHub Environment
+    # changes the OIDC subject to `repo:.../:environment:<name>`, which the
+    # deploy role's trust policy (locked to `ref:refs/heads/main`) rejects. To
+    # add environment approval gates later, also allow the environment subjects
+    # in infra/bootstrap's trust policy and re-apply bootstrap.
+    concurrency:
+      group: terraform-${{ inputs.env }}
+      cancel-in-progress: false
+    outputs:
+      api_endpoint: ${{ steps.smoke.outputs.api_endpoint }}
+    defaults:
+      run:
+        working-directory: infra/envs/${{ inputs.env }}
+    env:
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_allowed_emails: '["${{ vars.ALERT_EMAIL }}"]'
+      TF_VAR_allowed_subs: '["${{ vars.ALLOWED_SUBS }}"]'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # The wrapper echoes extra lines into stdout, which would corrupt
+          # $(terraform output -raw ...) and `terraform show -json` below.
+          terraform_wrapper: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Terraform zips services/api as-is for both Lambdas (API + worker), so
+      # runtime npm dependencies must be installed first. Dev dependencies are
+      # left out to keep the package small.
+      - name: Install API runtime dependencies
+        working-directory: services/api
+        run: if [ -f package-lock.json ]; then npm ci --omit=dev; fi
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Write backend config
+        run: |
+          cat > backend.hcl <<HCL
+          bucket         = "${{ vars.TF_STATE_BUCKET }}"
+          key            = "wardrobe-builder/${{ inputs.env }}/terraform.tfstate"
+          region         = "${{ env.AWS_REGION }}"
+          dynamodb_table = "${{ vars.TF_LOCK_TABLE }}"
+          encrypt        = true
+          HCL
+      - run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: Plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Summarise plan and check for destructive changes
+        run: |
+          set -euo pipefail
+          terraform show -json tfplan > plan.json
+          count() { jq "[.resource_changes[]? | select(.change.actions | $1)] | length" plan.json; }
+          CREATE=$(count 'index("create") and (index("delete") | not)')
+          UPDATE=$(count '. == ["update"]')
+          DESTROY=$(count 'index("delete")')
+          {
+            echo "### Terraform plan — ${{ inputs.env }}"
+            echo ""
+            echo "| create | update | delete / replace |"
+            echo "|---|---|---|"
+            echo "| $CREATE | $UPDATE | $DESTROY |"
+            if [ "$DESTROY" -gt 0 ]; then
+              echo ""
+              echo "Deleted or replaced:"
+              jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- `\(.address)` (\(.change.actions | join(" → ")))"' plan.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DESTROY" -gt 0 ] && [ "${{ inputs.allow_destroy }}" != "true" ]; then
+            echo "::error::Plan deletes or replaces $DESTROY resource(s) in ${{ inputs.env }}. Not applying automatically — review the plan, then run 'Terraform (infra)' manually with allow_destroy checked."
+            exit 1
+          fi
+
+      - name: Apply
+        run: terraform apply -input=false -no-color tfplan
+
+      # The public /health route must answer 200 from the freshly applied
+      # Lambda. Retries cover API Gateway/Lambda propagation.
+      - name: Smoke test /health
+        id: smoke
+        run: |
+          set -euo pipefail
+          API=$(terraform output -raw api_endpoint)
+          echo "api_endpoint=$API" >> "$GITHUB_OUTPUT"
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "$API/health"; then echo; echo "healthy: $API"; exit 0; fi
+            echo "attempt $i failed; retrying in 10s"; sleep 10
+          done
+          echo "::error::$API/health did not return 200 after deploy"
+          exit 1

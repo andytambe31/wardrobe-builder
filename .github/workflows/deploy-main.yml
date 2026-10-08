@@ -1,0 +1,87 @@
+name: Deploy (main)
+
+# Continuous deployment: every merge to main ships to dev, then prod.
+#
+#   preflight → dev infra → dev frontend → prod infra → prod frontend
+#
+# Each stage runs only if everything before it succeeded, including the smoke
+# tests (API /health after each apply, the live site after each frontend
+# deploy), so a change that breaks dev never reaches prod.
+#
+# Every stage always runs (rather than only for "changed" paths): terraform
+# apply is a no-op when nothing changed, and the frontend must be redeployed
+# whenever infra outputs (API URL, Cognito ids) change. It also means a
+# queued run that GitHub supersedes loses nothing — the newer run deploys all
+# of main. Docs-only pushes skip the pipeline.
+#
+# Guard rails (in the reusable workflows):
+#   • plans that delete or replace resources are never applied automatically;
+#     the run fails with the list on its summary page, and you apply by hand
+#     with Actions → Terraform (infra) → allow_destroy;
+#   • one deploy per env at a time, shared with the manual workflows;
+#   • set repo Variable AUTO_DEPLOY_PROD=false to stop at dev (prod then only
+#     deploys through the manual workflows).
+#
+# Until bootstrap has been run and the repo Variables are set, the pipeline
+# skips itself with a notice instead of failing every merge.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+          BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          LOCK: ${{ vars.TF_LOCK_TABLE }}
+        run: |
+          if [ -n "$ROLE" ] && [ -n "$BUCKET" ] && [ -n "$LOCK" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            MSG="Skipping deploy: AWS isn't wired up yet. Run infra/bootstrap, then set the AWS_ROLE_ARN, TF_STATE_BUCKET and TF_LOCK_TABLE repo Variables (see infra/README.md)."
+            echo "::notice::$MSG"
+            echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  infra-dev:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      env: dev
+
+  frontend-dev:
+    needs: infra-dev
+    uses: ./.github/workflows/_frontend-deploy.yml
+    with:
+      env: dev
+
+  infra-prod:
+    needs: frontend-dev
+    if: vars.AUTO_DEPLOY_PROD != 'false'
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      env: prod
+
+  frontend-prod:
+    needs: infra-prod
+    uses: ./.github/workflows/_frontend-deploy.yml
+    with:
+      env: prod
